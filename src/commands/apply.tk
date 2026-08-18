@@ -5,7 +5,7 @@ import std/time::{SystemTime}
 import official/sqlite::{Database, Transaction}
 import src/discovery::{MigrationFile, discover_migrations}
 import src/scanner::{scan_sql_safety}
-import src/ledger::{AppliedRecord, is_database_initialized, get_applied_records, ensure_ledger_table_tx}
+import src/ledger::{AppliedRecord, is_database_initialized, get_applied_records, ensure_ledger_table_tx, record_migration_prepared}
 
 pub fn execute_apply(db_path: string, migrations_dir: string) -> i32 {
     auto disc_res = discover_migrations(migrations_dir.clone())
@@ -147,21 +147,13 @@ pub fn execute_apply(db_path: string, migrations_dir: string) -> i32 {
             return 1
         }
 
-        // Record in ledger
+        // Record in ledger using prepared statement with bound parameters
         auto now_dt = SystemTime::now().to_utc()
         auto now_str = now_dt.to_string()
 
-        auto insert_sql# = string::from("INSERT INTO _toka_migrations (id, sha256, applied_at) VALUES ('")
-        insert_sql#.push_str(p.id.as_str())
-        insert_sql#.push_str("', '")
-        insert_sql#.push_str(p.sha256.as_str())
-        insert_sql#.push_str("', '")
-        insert_sql#.push_str(now_str.as_str())
-        insert_sql#.push_str("');")
-
-        auto record_res = tx#.execute(insert_sql.as_str())
+        auto record_res = record_migration_prepared(db, p.id.clone(), p.sha256.clone(), now_str)
         if record_res.is_err() {
-            println("Failed to record migration '{}' into ledger: {}", p.id, record_res.unwrap_err().message())
+            println("Failed to record migration '{}' into ledger: {}", p.id, record_res.unwrap_err())
             tx#.rollback()
             db#.close()
             return 1

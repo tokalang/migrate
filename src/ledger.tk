@@ -100,3 +100,36 @@ pub fn ensure_ledger_table_tx(tx: Transaction#) -> Result<bool, string> {
     }
     return Result<bool, string>::Ok(true)
 }
+
+pub fn record_migration_prepared(
+    db: Database#,
+    id: string,
+    sha256: string,
+    applied_at: string
+) -> Result<bool, string> {
+    auto stmt_res = db#.prepare("INSERT INTO _toka_migrations (id, sha256, applied_at) VALUES (?, ?, ?);")
+    if stmt_res.is_err() {
+        return Result<bool, string>::Err(stmt_res.unwrap_err().message())
+    }
+    auto stmt# = stmt_res.unwrap()
+
+    if stmt#.bind_text(1:i32, id.as_str()).is_err() {
+        stmt#.finalize()
+        return Result<bool, string>::Err(string::from("failed to bind id parameter"))
+    }
+    if stmt#.bind_text(2:i32, sha256.as_str()).is_err() {
+        stmt#.finalize()
+        return Result<bool, string>::Err(string::from("failed to bind sha256 parameter"))
+    }
+    if stmt#.bind_text(3:i32, applied_at.as_str()).is_err() {
+        stmt#.finalize()
+        return Result<bool, string>::Err(string::from("failed to bind applied_at parameter"))
+    }
+
+    auto step_res = stmt#.step()
+    stmt#.finalize()
+    if step_res.is_err() {
+        return Result<bool, string>::Err(step_res.unwrap_err().message())
+    }
+    return Result<bool, string>::Ok(true)
+}

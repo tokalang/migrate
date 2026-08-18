@@ -6,7 +6,7 @@ import src/commands/apply::{execute_apply}
 import src/commands/verify::{execute_verify}
 
 fn print_usage() {
-    println("migrate 0.1.0 - A local, deterministic SQLite migration orchestration CLI")
+    println("migrate 0.1.1 - A local, deterministic SQLite migration orchestration CLI")
     println("Usage:")
     println("  migrate [--database <path>] [--dir <path>] <status | plan | apply | verify>")
     println("")
@@ -41,7 +41,7 @@ fn main() -> i32 {
         }
 
         if arg_str == "-v" || arg_str == "--version" {
-            println("migrate 0.1.0")
+            println("migrate 0.1.1")
             return 0
         }
 

@@ -109,7 +109,7 @@ def main() -> int:
     assert "Usage:" in res.stdout and "Commands:" in res.stdout, "Help output malformed"
 
     res = run_cmd([str(bin_path), "--version"])
-    assert "migrate 0.1.0" in res.stdout, "Version string mismatch"
+    assert "migrate 0.1.1" in res.stdout, "Version string mismatch"
 
     # Step 3: Zero side-effect introspection (status, plan, verify on non-existent db)
     log("Step 3: Testing zero side-effect introspection on non-existent database file...")
@@ -162,9 +162,13 @@ def main() -> int:
         assert res.returncode == 1, "Expected failure on duplicate sequence numbers"
         assert "duplicate migration sequence number '0001'" in res.stdout
 
-    # Step 5: SQL Safety Scanning (Forbidden transaction control & VACUUM)
-    log("Step 5: Testing SQL safety scanning (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, VACUUM)...")
-    for bad_keyword in ("BEGIN TRANSACTION;", "commit;", "ROLLBACK;", "SAVEPOINT sp1;", "VACUUM;"):
+    # Step 5: SQL Safety Scanning (Forbidden transaction control, END, RELEASE, VACUUM, & comments/literals)
+    log("Step 5: Testing SQL safety scanning (BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT, RELEASE, VACUUM)...")
+    forbidden_keywords = (
+        "BEGIN TRANSACTION;", "commit;", "END;", "END TRANSACTION;",
+        "ROLLBACK;", "SAVEPOINT sp1;", "RELEASE SAVEPOINT sp1;", "RELEASE sp1;", "VACUUM;"
+    )
+    for bad_keyword in forbidden_keywords:
         with tempfile.TemporaryDirectory(prefix="migrate-safety-") as tmp_dir:
             db_file = os.path.join(tmp_dir, "test.db")
             mig_dir = os.path.join(tmp_dir, "migrations")
@@ -177,8 +181,25 @@ def main() -> int:
             assert "SQL Safety Check Failed" in res.stdout
             assert "forbidden statement" in res.stdout
 
-    # Step 6: Single-Migration Transaction Atomicity & Rollback
-    log("Step 6: Testing single-migration transaction atomicity and rollback...")
+    # Step 5b: Confirm comments and string literals containing keywords are allowed
+    log("Step 5b: Confirming keywords in SQL comments and string literals are safely allowed...")
+    with tempfile.TemporaryDirectory(prefix="migrate-safety-valid-") as tmp_dir:
+        db_file = os.path.join(tmp_dir, "valid.db")
+        mig_dir = os.path.join(tmp_dir, "migrations")
+        os.makedirs(mig_dir, exist_ok=True)
+        with open(os.path.join(mig_dir, "0001_valid_literals.up.sql"), "w") as f:
+            f.write("""-- Comment containing BEGIN, COMMIT, END, ROLLBACK, and VACUUM
+/* Multi-line comment
+   SAVEPOINT sp1; RELEASE sp1;
+*/
+CREATE TABLE logs (id INTEGER PRIMARY KEY, msg TEXT);
+INSERT INTO logs VALUES (1, 'User requested END of session with COMMIT token');
+""")
+        res = run_cmd([str(bin_path), "-d", db_file, "-m", mig_dir, "apply"])
+        assert "Applied '0001_valid_literals.up.sql' successfully." in res.stdout
+
+    # Step 6: Single-Migration Transaction Atomicity & Rollback (including END evasion attack check)
+    log("Step 6: Testing single-migration transaction atomicity, rollback, and END evasion defense...")
     with tempfile.TemporaryDirectory(prefix="migrate-atomicity-") as tmp_dir:
         db_file = os.path.join(tmp_dir, "test.db")
         mig_dir = os.path.join(tmp_dir, "migrations")
@@ -206,6 +227,27 @@ def main() -> int:
         records = [r[0] for r in cursor.fetchall()]
         assert records == ["0001_step1.up.sql"], f"Ledger should only contain 0001, got: {records}"
         conn.close()
+
+    # Step 6b: END evasion attack: ensure table is not left on disk
+    with tempfile.TemporaryDirectory(prefix="migrate-evasion-") as tmp_dir:
+        db_file = os.path.join(tmp_dir, "evasion.db")
+        mig_dir = os.path.join(tmp_dir, "migrations")
+        os.makedirs(mig_dir, exist_ok=True)
+        with open(os.path.join(mig_dir, "0001_evade.up.sql"), "w") as f:
+            f.write("CREATE TABLE escaped_commit (id INT); END; THIS IS INVALID SQL;")
+
+        res = run_cmd([str(bin_path), "-d", db_file, "-m", mig_dir, "apply"], check=False)
+        assert res.returncode == 1, "apply must fail on END evasion attack"
+        assert "forbidden statement: 'END'" in res.stdout
+
+        if os.path.exists(db_file):
+            conn = sqlite3.connect(db_file)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [r[0] for r in cursor.fetchall()]
+            assert "escaped_commit" not in tables, "escaped_commit table must NOT exist!"
+            assert "_toka_migrations" not in tables, "_toka_migrations table must NOT exist!"
+            conn.close()
 
     # Step 7: Full Normal Lifecycle (status -> plan -> apply -> verify)
     log("Step 7: Testing full multi-step migration lifecycle (status -> plan -> apply -> verify)...")
@@ -296,7 +338,7 @@ def main() -> int:
         assert res.returncode == 1, "apply should fail closed when recorded file is deleted"
         assert "Recorded migration '0002_posts.up.sql' is missing on disk!" in res.stdout
 
-    log("ALL 9 QUALIFICATION TESTS PASSED (100% SUCCESS)!")
+    log("ALL QUALIFICATION TESTS (INCLUDING END/RELEASE EVASION DEFENSE) PASSED (100% SUCCESS)!")
     return 0
 
 
