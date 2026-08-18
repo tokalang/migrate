@@ -9,7 +9,8 @@ An official standalone application deliverable for Toka providing local, determi
 - **Zero Side-Effect Introspection**: Read-only commands (`status`, `plan`, `verify`) probe existing databases without creating ledger tables or empty database files.
 - **Pre-flight Integrity Audit**: `apply` verifies that all previously recorded migrations match on-disk file checksums before executing any pending migrations.
 - **Tamper Detection via SHA-256**: State ledger records migration identity, SHA-256 checksum, and execution timestamp (`_toka_migrations`).
-- **SQL Safety Scanning**: Pre-scans migration SQL text to forbid nested transaction statements (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`) and `VACUUM`.
+- **SQL Safety Scanning**: Pre-scans migration SQL text to forbid statements that break driver-managed transaction boundaries (`BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`) as well as `VACUUM`.
+  > *Note*: Because `BEGIN` and `END` are forbidden at the lexer level to guarantee transaction isolation, SQLite trigger definitions (`CREATE TRIGGER ... BEGIN ... END;`) cannot be defined directly in migration scripts. Trigger creation should be managed via application initialization or trusted unmanaged scripts.
 
 ## Installation & Consumption
 
@@ -17,7 +18,7 @@ In your Toka project manifest (`package.tk`):
 
 ```toka
 dependencies = (
-    migrate = "migrate:0.1.0",
+    migrate = "migrate:0.1.1",
 )
 ```
 
