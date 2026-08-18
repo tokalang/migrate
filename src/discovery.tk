@@ -1,0 +1,185 @@
+import core/option::{Option}
+import core/result::{Result}
+import std/vec::{Vec}
+import std/fs::{read_dir, read_to_string}
+import src/hasher::{compute_sha256_hex}
+
+pub shape MigrationFile (
+    id: string,
+    seq: string,
+    slug: string,
+    filepath: string,
+    sha256: string
+)
+
+impl MigrationFile {
+    pub fn clone(self) -> MigrationFile {
+        return MigrationFile(
+            id = self.id.clone(),
+            seq = self.seq.clone(),
+            slug = self.slug.clone(),
+            filepath = self.filepath.clone(),
+            sha256 = self.sha256.clone()
+        )
+    }
+}
+
+fn is_digit_u32(u: u32) -> bool {
+    return u >= 48 && u <= 57
+}
+
+fn is_valid_slug_char_u32(u: u32) -> bool {
+    if u >= 48 && u <= 57 { return true }   // 0-9
+    if u >= 65 && u <= 90 { return true }   // A-Z
+    if u >= 97 && u <= 122 { return true }  // a-z
+    if u == 95 || u == 45 { return true }   // _ or -
+    return false
+}
+
+pub fn discover_migrations(dir_path: string) -> Result<Vec<MigrationFile>, string> {
+    auto rd# = read_dir(dir_path.clone())
+    if rd.handle == ADDR0 {
+        auto err# = string::from("migration directory '")
+        err#.push_str(dir_path.as_str())
+        err#.push_str("' cannot be opened or does not exist")
+        return Result<Vec<MigrationFile>, string>::Err(cede err)
+    }
+
+    auto raw_files# = Vec<string>::new()
+    loop true {
+        auto opt = rd#.next()
+        if opt.is_none() { break }
+        auto name = opt.unwrap()
+        raw_files#.push(cede name)
+    }
+    rd#.close()
+
+    auto migrations# = Vec<MigrationFile>::new()
+    auto i# = 0:usize
+    loop i < raw_files.len() {
+        auto &filename = raw_files.get_ref(i)
+        auto view = filename.as_str()
+        auto len = view.len()
+
+        // Check if starts with digit
+        if len > 0 && is_digit_u32(view.at(0:usize).unwrap()) {
+            // Must have 4-digit prefix
+            if len < 12 {
+                auto err# = string::from("malformed migration filename: '")
+                err#.push_str(filename.as_str())
+                err#.push_str("' (must match ^[0-9]{4}_[a-zA-Z0-9_-]+\\.up\\.sql$)")
+                return Result<Vec<MigrationFile>, string>::Err(cede err)
+            }
+
+            auto d0 = is_digit_u32(view.at(0:usize).unwrap())
+            auto d1 = is_digit_u32(view.at(1:usize).unwrap())
+            auto d2 = is_digit_u32(view.at(2:usize).unwrap())
+            auto d3 = is_digit_u32(view.at(3:usize).unwrap())
+            auto under = view.at(4:usize).unwrap() == 95:u32 // '_'
+
+            if !d0 || !d1 || !d2 || !d3 || !under {
+                auto err# = string::from("malformed migration filename: '")
+                err#.push_str(filename.as_str())
+                err#.push_str("' (must match ^[0-9]{4}_[a-zA-Z0-9_-]+\\.up\\.sql$)")
+                return Result<Vec<MigrationFile>, string>::Err(cede err)
+            }
+
+            // Must end with .up.sql (7 chars)
+            auto suffix_view = view.substring(len - 7, len)
+            if suffix_view != ".up.sql" {
+                auto err# = string::from("malformed migration filename: '")
+                err#.push_str(filename.as_str())
+                err#.push_str("' (must end with .up.sql)")
+                return Result<Vec<MigrationFile>, string>::Err(cede err)
+            }
+
+            // Slug between index 5 and len - 7
+            auto slug_view = view.substring(5:usize, len - 7)
+            if slug_view.len() == 0 {
+                auto err# = string::from("malformed migration filename: '")
+                err#.push_str(filename.as_str())
+                err#.push_str("' (slug cannot be empty)")
+                return Result<Vec<MigrationFile>, string>::Err(cede err)
+            }
+
+            auto s_idx# = 0:usize
+            loop s_idx < slug_view.len() {
+                auto ch_u32 = slug_view.at(s_idx).unwrap()
+                if !is_valid_slug_char_u32(ch_u32) {
+                    auto err# = string::from("malformed migration filename: '")
+                    err#.push_str(filename.as_str())
+                    err#.push_str("' (slug contains invalid character '")
+                    err#.push_str(slug_view.substring(s_idx, s_idx + 1:usize))
+                    err#.push_str("')")
+                    return Result<Vec<MigrationFile>, string>::Err(cede err)
+                }
+                s_idx += 1
+            }
+
+            auto seq_view = view.substring(0:usize, 4:usize)
+            auto seq_str = string::from(seq_view)
+
+            // Check for duplicate sequence numbers
+            auto check_j# = 0:usize
+            loop check_j < migrations.len() {
+                auto &m = migrations.get_ref(check_j)
+                if m.seq.as_str() == seq_str.as_str() {
+                    auto err# = string::from("duplicate migration sequence number '")
+                    err#.push_str(seq_str.as_str())
+                    err#.push_str("': conflicting files '")
+                    err#.push_str(m.id.as_str())
+                    err#.push_str("' and '")
+                    err#.push_str(filename.as_str())
+                    err#.push_str("'")
+                    return Result<Vec<MigrationFile>, string>::Err(cede err)
+                }
+                check_j += 1
+            }
+
+            // Construct full path and read content for sha256
+            auto full_path# = string::from(dir_path.as_str())
+            if !full_path.as_str().ends_with("/") {
+                full_path#.push_str("/")
+            }
+            full_path#.push_str(filename.as_str())
+
+            auto read_res = read_to_string(full_path.clone())
+            if read_res.is_err() {
+                auto err# = string::from("failed to read migration file '")
+                err#.push_str(full_path.as_str())
+                err#.push_str("'")
+                return Result<Vec<MigrationFile>, string>::Err(cede err)
+            }
+            auto content = read_res.unwrap()
+            auto sha_hex = compute_sha256_hex(content.as_str())
+
+            migrations#.push(MigrationFile(
+                id = filename.clone(),
+                seq = cede seq_str,
+                slug = string::from(slug_view),
+                filepath = cede full_path,
+                sha256 = cede sha_hex
+            ))
+        }
+        i += 1
+    }
+
+    // Sort migrations lexicographically by id
+    auto sorted# = Vec<MigrationFile>::new()
+    loop migrations.len() > 0 {
+        auto best_idx# = 0:usize
+        auto cand_k# = 1:usize
+        loop cand_k < migrations.len() {
+            auto &best = migrations.get_ref(best_idx)
+            auto &cand = migrations.get_ref(cand_k)
+            if cand.id.as_str().cmp(best.id.as_str()) < 0 {
+                best_idx = cand_k
+            }
+            cand_k += 1
+        }
+        auto min_item = migrations#.remove(best_idx).unwrap()
+        sorted#.push(cede min_item)
+    }
+
+    return Result<Vec<MigrationFile>, string>::Ok(cede sorted)
+}

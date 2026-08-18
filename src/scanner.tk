@@ -1,0 +1,61 @@
+import core/result::{Result}
+
+fn is_alpha_num(u: u32) -> bool {
+    if u >= 48 && u <= 57 { return true }   // 0-9
+    if u >= 65 && u <= 90 { return true }   // A-Z
+    if u >= 97 && u <= 122 { return true }  // a-z
+    if u == 95 { return true }              // _
+    return false
+}
+
+fn word_matches(view: str, expected: str) -> bool {
+    if view.len() != expected.len() { return false }
+    auto i# = 0:usize
+    auto len = view.len()
+    loop i < len {
+        auto c = view.at(i).unwrap()
+        auto e = expected.at(i).unwrap()
+        auto c_upper# = c
+        if c >= 97 && c <= 122 {
+            c_upper = c - 32
+        }
+        if c_upper != e { return false }
+        i += 1
+    }
+    return true
+}
+
+pub fn scan_sql_safety(sql: string) -> Result<bool, string> {
+    auto view = sql.as_str()
+    auto len = view.len()
+    auto i# = 0:usize
+
+    loop i < len {
+        // Skip non-alphanumeric delimiters
+        loop i < len {
+            auto c = view.at(i).unwrap()
+            if is_alpha_num(c) { break }
+            i += 1
+        }
+        if i >= len { break }
+
+        auto start = i
+        loop i < len {
+            auto c = view.at(i).unwrap()
+            if !is_alpha_num(c) { break }
+            i += 1
+        }
+
+        auto word_view = view.substring(start, i)
+        if word_matches(word_view, "BEGIN") || word_matches(word_view, "COMMIT") ||
+           word_matches(word_view, "ROLLBACK") || word_matches(word_view, "SAVEPOINT") ||
+           word_matches(word_view, "VACUUM") {
+            auto err# = string::from("migration SQL contains forbidden statement: '")
+            err#.push_str(word_view)
+            err#.push_str("'. Custom transaction control or VACUUM is not permitted inside migrations.")
+            return Result<bool, string>::Err(cede err)
+        }
+    }
+
+    return Result<bool, string>::Ok(true)
+}

@@ -1,0 +1,70 @@
+import std/vec::{Vec}
+import std/io::{println}
+import official/sqlite::{Database}
+import src/discovery::{MigrationFile, discover_migrations}
+import src/ledger::{AppliedRecord, is_database_initialized, get_applied_records}
+
+pub fn execute_plan(db_path: string, migrations_dir: string) -> i32 {
+    auto disc_res = discover_migrations(migrations_dir.clone())
+    if disc_res.is_err() {
+        println("Error during migration discovery: {}", disc_res.unwrap_err())
+        return 1
+    }
+    auto local_files = disc_res.unwrap()
+
+    auto applied_records# = Vec<AppliedRecord>::new()
+    if is_database_initialized(db_path.clone()) {
+        auto db_res = Database::open(db_path.as_str())
+        if db_res.is_err() {
+            println("Error opening database '{}': {}", db_path, db_res.unwrap_err().message())
+            return 1
+        }
+        auto db# = db_res.unwrap()
+        auto rec_res = get_applied_records(db)
+        db#.close()
+        if rec_res.is_err() {
+            println("Error reading migration ledger: {}", rec_res.unwrap_err())
+            return 1
+        }
+        applied_records = rec_res.unwrap()
+    }
+
+    auto pending_files# = Vec<MigrationFile>::new()
+    auto i# = 0:usize
+    loop i < local_files.len() {
+        auto &m = local_files.get_ref(i)
+        auto already_applied# = false
+        auto j# = 0:usize
+        loop j < applied_records.len() {
+            auto &rec = applied_records.get_ref(j)
+            if rec.id.as_str() == m.id.as_str() {
+                already_applied = true
+                break
+            }
+            j += 1
+        }
+        if !already_applied {
+            pending_files#.push(m.clone())
+        }
+        i += 1
+    }
+
+    println("Execution Plan for database '{}':", db_path)
+    println("--------------------------------------------------------------------------------")
+    if pending_files.len() == 0 {
+        println("  Database is already up to date. No pending migrations.")
+        println("--------------------------------------------------------------------------------")
+        return 0
+    }
+
+    auto p_idx# = 0:usize
+    loop p_idx < pending_files.len() {
+        auto &p = pending_files.get_ref(p_idx)
+        auto step_num = (p_idx + 1:usize).to_string()
+        println("  {}. {} (sha256: {})", step_num, p.id, p.sha256)
+        p_idx += 1
+    }
+    println("--------------------------------------------------------------------------------")
+    println("Total pending migrations to apply: {}", pending_files.len().to_string())
+    return 0
+}

@@ -1,0 +1,21 @@
+pub const PACKAGE = (
+    name = "migrate",
+    version = "0.1.0",
+    kind = "application",
+    license = "MIT",
+    compiler = "1.0.0-rc.6",
+    entry_modules = ("src/main.tk",),
+    targets = ("macos", "linux"),
+    dependencies = (
+        sqlite = "sqlite:0.1.1",
+    )
+)
+
+pub const AI_CONTRACT = (
+    schema = "toka-application-v1",
+    summary = "A local, deterministic SQLite migration CLI with single-migration transaction atomicity and checksum audit.",
+    capabilities = ("deterministic migration discovery", "transactional up execution", "state ledger verification", "tamper detection via SHA-256", "zero-side-effect introspection"),
+    non_goals = ("rollback/down migration", "network databases", "ORM", "code generation", "daemon"),
+    safety = ("each migration runs inside an explicit transaction; scripts with transaction statements or VACUUM are rejected before execution"),
+    qualification = ("python3 tests/qualify.py")
+)

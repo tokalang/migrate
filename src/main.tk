@@ -1,0 +1,98 @@
+import std/env as env
+import std/io::{println}
+import src/commands/status::{execute_status}
+import src/commands/plan::{execute_plan}
+import src/commands/apply::{execute_apply}
+import src/commands/verify::{execute_verify}
+
+fn print_usage() {
+    println("migrate 0.1.0 - A local, deterministic SQLite migration orchestration CLI")
+    println("Usage:")
+    println("  migrate [--database <path>] [--dir <path>] <status | plan | apply | verify>")
+    println("")
+    println("Commands:")
+    println("  status              Show migration status (applied, pending, tampered)")
+    println("  plan                Preview pending migrations without execution")
+    println("  apply               Execute pending migrations in atomic transactions")
+    println("  verify              Audit integrity of applied migrations against local files")
+    println("")
+    println("Options:")
+    println("  -d, --database <path>  Path to SQLite database (default: app.db, supports :memory:)")
+    println("  -m, --dir <path>       Directory containing migration files (default: ./migrations)")
+    println("  -v, --version          Print version information")
+    println("  -h, --help             Print this help message")
+}
+
+fn main() -> i32 {
+    auto args = env::args()
+    auto db_path# = string::from("app.db")
+    auto migrations_dir# = string::from("./migrations")
+    auto command# = string::from("")
+
+    auto i# = 1:usize
+    auto total = args.len()
+    loop i < total {
+        auto &arg = args.get_ref(i)
+        auto arg_str = arg.as_str()
+
+        if arg_str == "-h" || arg_str == "--help" {
+            print_usage()
+            return 0
+        }
+
+        if arg_str == "-v" || arg_str == "--version" {
+            println("migrate 0.1.0")
+            return 0
+        }
+
+        if arg_str == "-d" || arg_str == "--database" {
+            i += 1
+            if i >= total {
+                println("Error: --database option requires a path argument")
+                return 1
+            }
+            db_path = args.get_ref(i).clone()
+        } else if arg_str == "-m" || arg_str == "--dir" {
+            i += 1
+            if i >= total {
+                println("Error: --dir option requires a directory argument")
+                return 1
+            }
+            migrations_dir = args.get_ref(i).clone()
+        } else if arg_str.starts_with("-") {
+            println("Error: unknown option '{}'", arg_str)
+            print_usage()
+            return 1
+        } else {
+            if command.len() == 0 {
+                command = string::from(arg_str)
+            } else {
+                println("Error: unexpected extra argument '{}'", arg_str)
+                print_usage()
+                return 1
+            }
+        }
+        i += 1
+    }
+
+    if command.len() == 0 {
+        println("Error: no command specified (expected: status, plan, apply, verify)")
+        print_usage()
+        return 1
+    }
+
+    auto cmd_str = command.as_str()
+    if cmd_str == "status" {
+        return execute_status(db_path, migrations_dir)
+    } else if cmd_str == "plan" {
+        return execute_plan(db_path, migrations_dir)
+    } else if cmd_str == "apply" {
+        return execute_apply(db_path, migrations_dir)
+    } else if cmd_str == "verify" {
+        return execute_verify(db_path, migrations_dir)
+    } else {
+        println("Error: unknown command '{}' (expected: status, plan, apply, verify)", cmd_str)
+        print_usage()
+        return 1
+    }
+}

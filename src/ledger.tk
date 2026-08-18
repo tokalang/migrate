@@ -1,0 +1,102 @@
+import core/option::{Option}
+import core/result::{Result}
+import std/vec::{Vec}
+import std/fs::{exists}
+import official/sqlite::{Database, Statement, Transaction, Step}
+
+pub shape AppliedRecord (
+    id: string,
+    sha256: string,
+    applied_at: string
+)
+
+impl AppliedRecord {
+    pub fn clone(self) -> AppliedRecord {
+        return AppliedRecord(
+            id = self.id.clone(),
+            sha256 = self.sha256.clone(),
+            applied_at = self.applied_at.clone()
+        )
+    }
+}
+
+pub fn is_database_initialized(db_path: string) -> bool {
+    if db_path.as_str() == ":memory:" {
+        return true
+    }
+    return exists(db_path)
+}
+
+pub fn has_ledger_table(db: Database#) -> Result<bool, string> {
+    auto stmt_res = db#.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_toka_migrations';")
+    if stmt_res.is_err() {
+        return Result<bool, string>::Err(stmt_res.unwrap_err().message())
+    }
+    auto stmt# = stmt_res.unwrap()
+    auto step_res = stmt#.step()
+    if step_res.is_err() {
+        stmt#.finalize()
+        return Result<bool, string>::Err(step_res.unwrap_err().message())
+    }
+    auto step_val = step_res.unwrap()
+    stmt#.finalize()
+
+    if step_val == Step::Row {
+        return Result<bool, string>::Ok(true)
+    }
+    return Result<bool, string>::Ok(false)
+}
+
+pub fn get_applied_records(db: Database#) -> Result<Vec<AppliedRecord>, string> {
+    auto has_table_res = has_ledger_table(db)
+    if has_table_res.is_err() {
+        return Result<Vec<AppliedRecord>, string>::Err(has_table_res.unwrap_err())
+    }
+    if !has_table_res.unwrap() {
+        return Result<Vec<AppliedRecord>, string>::Ok(Vec<AppliedRecord>::new())
+    }
+
+    auto stmt_res = db#.prepare("SELECT id, sha256, applied_at FROM _toka_migrations ORDER BY id ASC;")
+    if stmt_res.is_err() {
+        return Result<Vec<AppliedRecord>, string>::Err(stmt_res.unwrap_err().message())
+    }
+    auto stmt# = stmt_res.unwrap()
+    auto records# = Vec<AppliedRecord>::new()
+
+    loop true {
+        auto step_res = stmt#.step()
+        if step_res.is_err() {
+            stmt#.finalize()
+            return Result<Vec<AppliedRecord>, string>::Err(step_res.unwrap_err().message())
+        }
+        auto step_val = step_res.unwrap()
+        if step_val == Step::Done { break }
+        if step_val == Step::Row {
+            auto id_opt = stmt.column_text(0:i32).unwrap()
+            auto sha_opt = stmt.column_text(1:i32).unwrap()
+            auto time_opt = stmt.column_text(2:i32).unwrap()
+
+            auto id_str = id_opt.unwrap_or(string::from(""))
+            auto sha_str = sha_opt.unwrap_or(string::from(""))
+            auto time_str = time_opt.unwrap_or(string::from(""))
+
+            records#.push(AppliedRecord(
+                id = cede id_str,
+                sha256 = cede sha_str,
+                applied_at = cede time_str
+            ))
+        }
+    }
+
+    stmt#.finalize()
+    return Result<Vec<AppliedRecord>, string>::Ok(cede records)
+}
+
+pub fn ensure_ledger_table_tx(tx: Transaction#) -> Result<bool, string> {
+    auto ddl = "CREATE TABLE IF NOT EXISTS _toka_migrations (id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at TEXT NOT NULL);"
+    auto res = tx#.execute(ddl)
+    if res.is_err() {
+        return Result<bool, string>::Err(res.unwrap_err().message())
+    }
+    return Result<bool, string>::Ok(true)
+}

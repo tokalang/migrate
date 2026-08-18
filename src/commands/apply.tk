@@ -1,0 +1,186 @@
+import std/vec::{Vec}
+import std/io::{println}
+import std/fs::{read_to_string}
+import std/time::{SystemTime}
+import official/sqlite::{Database, Transaction}
+import src/discovery::{MigrationFile, discover_migrations}
+import src/scanner::{scan_sql_safety}
+import src/ledger::{AppliedRecord, is_database_initialized, get_applied_records, ensure_ledger_table_tx}
+
+pub fn execute_apply(db_path: string, migrations_dir: string) -> i32 {
+    auto disc_res = discover_migrations(migrations_dir.clone())
+    if disc_res.is_err() {
+        println("Error during migration discovery: {}", disc_res.unwrap_err())
+        return 1
+    }
+    auto local_files = disc_res.unwrap()
+
+    auto db_res = Database::open(db_path.as_str())
+    if db_res.is_err() {
+        println("Error opening database '{}': {}", db_path, db_res.unwrap_err().message())
+        return 1
+    }
+    auto db# = db_res.unwrap()
+
+    // Step 1: Pre-flight Integrity Audit of already applied migrations (Fail-Closed)
+    auto rec_res = get_applied_records(db)
+    if rec_res.is_err() {
+        println("Error reading migration ledger: {}", rec_res.unwrap_err())
+        db#.close()
+        return 1
+    }
+    auto applied_records = rec_res.unwrap()
+
+    auto preflight_failed# = false
+    auto r_idx# = 0:usize
+    loop r_idx < applied_records.len() {
+        auto &rec = applied_records.get_ref(r_idx)
+        auto found_local# = false
+        auto local_sha# = string::from("")
+
+        auto l_idx# = 0:usize
+        loop l_idx < local_files.len() {
+            auto &m = local_files.get_ref(l_idx)
+            if m.id.as_str() == rec.id.as_str() {
+                found_local = true
+                local_sha = m.sha256.clone()
+                break
+            }
+            l_idx += 1
+        }
+
+        if !found_local {
+            println("PRE-FLIGHT AUDIT FAILED: Recorded migration '{}' is missing on disk!", rec.id)
+            preflight_failed = true
+        } else {
+            if local_sha.as_str() != rec.sha256.as_str() {
+                println("PRE-FLIGHT AUDIT FAILED: Recorded migration '{}' checksum mismatch! (recorded: {}, local: {})",
+                    rec.id, rec.sha256, local_sha)
+                preflight_failed = true
+            }
+        }
+        r_idx += 1
+    }
+
+    if preflight_failed {
+        println("Cannot apply new migrations: database ledger integrity is compromised.")
+        db#.close()
+        return 1
+    }
+
+    // Step 2: Determine pending migrations
+    auto pending_files# = Vec<MigrationFile>::new()
+    auto i# = 0:usize
+    loop i < local_files.len() {
+        auto &m = local_files.get_ref(i)
+        auto already_applied# = false
+        auto j# = 0:usize
+        loop j < applied_records.len() {
+            auto &rec = applied_records.get_ref(j)
+            if rec.id.as_str() == m.id.as_str() {
+                already_applied = true
+                break
+            }
+            j += 1
+        }
+        if !already_applied {
+            pending_files#.push(m.clone())
+        }
+        i += 1
+    }
+
+    if pending_files.len() == 0 {
+        println("Database is already up to date. 0 pending migrations.")
+        db#.close()
+        return 0
+    }
+
+    println("Applying {} pending migration(s) to database '{}'...", pending_files.len().to_string(), db_path)
+
+    // Step 3: Execute each pending migration in its own atomic transaction
+    auto p_idx# = 0:usize
+    loop p_idx < pending_files.len() {
+        auto &p = pending_files.get_ref(p_idx)
+        println("  -> Applying '{}'...", p.id)
+
+        // Read SQL content
+        auto sql_res = read_to_string(p.filepath.clone())
+        if sql_res.is_err() {
+            println("Error reading migration script '{}': {}", p.filepath, sql_res.unwrap_err())
+            db#.close()
+            return 1
+        }
+        auto sql = sql_res.unwrap()
+
+        // Pre-scan SQL safety (reject nested BEGIN/COMMIT/ROLLBACK/SAVEPOINT/VACUUM)
+        auto scan_res = scan_sql_safety(sql.clone())
+        if scan_res.is_err() {
+            println("SQL Safety Check Failed for '{}': {}", p.id, scan_res.unwrap_err())
+            db#.close()
+            return 1
+        }
+
+        // Start transaction
+        auto tx_res = db#.begin()
+        if tx_res.is_err() {
+            println("Failed to start transaction for migration '{}': {}", p.id, tx_res.unwrap_err().message())
+            db#.close()
+            return 1
+        }
+        auto tx# = tx_res.unwrap()
+
+        // Ensure ledger table exists inside the transaction
+        auto ensure_res = ensure_ledger_table_tx(tx)
+        if ensure_res.is_err() {
+            println("Failed to ensure ledger table in transaction: {}", ensure_res.unwrap_err())
+            tx#.rollback()
+            db#.close()
+            return 1
+        }
+
+        // Execute migration SQL
+        auto exec_res = tx#.execute(sql.as_str())
+        if exec_res.is_err() {
+            println("Failed to execute migration SQL in '{}': {}", p.id, exec_res.unwrap_err().message())
+            tx#.rollback()
+            db#.close()
+            return 1
+        }
+
+        // Record in ledger
+        auto now_dt = SystemTime::now().to_utc()
+        auto now_str = now_dt.to_string()
+
+        auto insert_sql# = string::from("INSERT INTO _toka_migrations (id, sha256, applied_at) VALUES ('")
+        insert_sql#.push_str(p.id.as_str())
+        insert_sql#.push_str("', '")
+        insert_sql#.push_str(p.sha256.as_str())
+        insert_sql#.push_str("', '")
+        insert_sql#.push_str(now_str.as_str())
+        insert_sql#.push_str("');")
+
+        auto record_res = tx#.execute(insert_sql.as_str())
+        if record_res.is_err() {
+            println("Failed to record migration '{}' into ledger: {}", p.id, record_res.unwrap_err().message())
+            tx#.rollback()
+            db#.close()
+            return 1
+        }
+
+        // Commit transaction
+        auto commit_res = tx#.commit()
+        if commit_res.is_err() {
+            println("Failed to commit transaction for migration '{}': {}", p.id, commit_res.unwrap_err().message())
+            tx#.rollback()
+            db#.close()
+            return 1
+        }
+
+        println("  [+] Applied '{}' successfully.", p.id)
+        p_idx += 1
+    }
+
+    db#.close()
+    println("Successfully applied all {} migration(s).", pending_files.len().to_string())
+    return 0
+}

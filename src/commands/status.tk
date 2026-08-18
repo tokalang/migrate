@@ -1,0 +1,108 @@
+import std/vec::{Vec}
+import std/io::{println}
+import official/sqlite::{Database}
+import src/discovery::{MigrationFile, discover_migrations}
+import src/ledger::{AppliedRecord, is_database_initialized, get_applied_records}
+
+pub fn execute_status(db_path: string, migrations_dir: string) -> i32 {
+    auto disc_res = discover_migrations(migrations_dir.clone())
+    if disc_res.is_err() {
+        println("Error during migration discovery: {}", disc_res.unwrap_err())
+        return 1
+    }
+    auto local_files = disc_res.unwrap()
+
+    auto applied_records# = Vec<AppliedRecord>::new()
+    if is_database_initialized(db_path.clone()) {
+        auto db_res = Database::open(db_path.as_str())
+        if db_res.is_err() {
+            println("Error opening database '{}': {}", db_path, db_res.unwrap_err().message())
+            return 1
+        }
+        auto db# = db_res.unwrap()
+        auto rec_res = get_applied_records(db)
+        db#.close()
+        if rec_res.is_err() {
+            println("Error reading migration ledger: {}", rec_res.unwrap_err())
+            return 1
+        }
+        applied_records = rec_res.unwrap()
+    }
+
+    println("Migration Status for database '{}' (dir: '{}'):", db_path, migrations_dir)
+    println("--------------------------------------------------------------------------------")
+
+    auto applied_count# = 0:usize
+    auto pending_count# = 0:usize
+    auto tampered_count# = 0:usize
+
+    auto i# = 0:usize
+    loop i < local_files.len() {
+        auto &m = local_files.get_ref(i)
+        auto found_applied# = false
+        auto applied_sha# = string::from("")
+        auto applied_at# = string::from("")
+
+        auto j# = 0:usize
+        loop j < applied_records.len() {
+            auto &rec = applied_records.get_ref(j)
+            if rec.id.as_str() == m.id.as_str() {
+                found_applied = true
+                applied_sha = rec.sha256.clone()
+                applied_at = rec.applied_at.clone()
+                break
+            }
+            j += 1
+        }
+
+        if !found_applied {
+            pending_count += 1
+            println("  [PENDING]  {}", m.id)
+        } else {
+            if applied_sha.as_str() == m.sha256.as_str() {
+                applied_count += 1
+                println("  [APPLIED]  {} (applied at: {})", m.id, applied_at)
+            } else {
+                tampered_count += 1
+                println("  [TAMPERED] {} (recorded: {}, local: {})", m.id, applied_sha, m.sha256)
+            }
+        }
+        i += 1
+    }
+
+    // Check for migrations recorded in db but missing locally
+    auto missing_count# = 0:usize
+    auto r_idx# = 0:usize
+    loop r_idx < applied_records.len() {
+        auto &rec = applied_records.get_ref(r_idx)
+        auto found_local# = false
+        auto l_idx# = 0:usize
+        loop l_idx < local_files.len() {
+            auto &m = local_files.get_ref(l_idx)
+            if m.id.as_str() == rec.id.as_str() {
+                found_local = true
+                break
+            }
+            l_idx += 1
+        }
+        if !found_local {
+            missing_count += 1
+            println("  [MISSING]  {} (recorded in database but missing on disk)", rec.id)
+        }
+        r_idx += 1
+    }
+
+    println("--------------------------------------------------------------------------------")
+    println("Summary: Total Local: {} | Applied: {} | Pending: {} | Tampered: {} | Missing: {}",
+        local_files.len().to_string(),
+        applied_count.to_string(),
+        pending_count.to_string(),
+        tampered_count.to_string(),
+        missing_count.to_string()
+    )
+
+    if tampered_count > 0 || missing_count > 0 {
+        return 1
+    }
+    return 0
+}
